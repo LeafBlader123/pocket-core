@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	sdk "github.com/pokt-network/pocket-core/types"
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,80 @@ func TestIsUniqueProof(t *testing.T) {
 	assert.Nil(t, err)
 	assert.False(t, IsUniqueProof(p, e), "p is no longer unique")
 	assert.True(t, IsUniqueProof(p1, e), "p is unique")
+
+}
+
+func TestSetProofRaceCondition(t *testing.T) {
+	appPubKey := getRandomPubKey().RawString()
+	servicerPubKey := getRandomPubKey().RawString()
+	clientPubKey := getRandomPubKey().RawString()
+	ethereum := hex.EncodeToString([]byte{0001})
+	header := SessionHeader{
+		ApplicationPubKey:  appPubKey,
+		Chain:              ethereum,
+		SessionBlockHeight: 1,
+	}
+	proof := RelayProof{
+		Entropy:            0,
+		SessionBlockHeight: 1,
+		ServicerPubKey:     servicerPubKey,
+		RequestHash:        header.HashString(), // fake
+		Blockchain:         ethereum,
+		Token: AAT{
+			Version:              "0.0.1",
+			ApplicationPublicKey: appPubKey,
+			ClientPublicKey:      clientPubKey,
+			ApplicationSignature: "",
+		},
+		Signature: "",
+	}
+
+	proof2 := RelayProof{
+		Entropy:            0,
+		SessionBlockHeight: 1,
+		ServicerPubKey:     servicerPubKey,
+		RequestHash:        header.HashString(), // fake
+		Blockchain:         ethereum,
+		Token: AAT{
+			Version:              "0.0.1",
+			ApplicationPublicKey: appPubKey,
+			ClientPublicKey:      clientPubKey,
+			ApplicationSignature: "",
+		},
+		Signature: "",
+	}
+
+	// setProofModified is a copy of SetProof with a sleep after retrieving the evidence to make the race condition determinstic.
+	setProofModified := func(header SessionHeader, evidenceType EvidenceType, p Proof, max sdk.BigInt, afterEvidenceRetrievalSleep time.Duration) {
+		evidence, err := GetEvidence(header, evidenceType, max)
+		time.Sleep(afterEvidenceRetrievalSleep * time.Second)
+		// if not found generate the GOBEvidence object
+		assert.Nil(t, err)
+		// add proof
+		evidence.AddProof(p)
+		// set GOBEvidence back
+		SetEvidence(evidence)
+	}
+
+	maxRelays := sdk.NewInt(100000)
+
+	c := make(chan int)
+	storeRelayProof := func(proof RelayProof, afterEvidenceRetrievalSleep time.Duration, c chan int) {
+		setProofModified(header, RelayEvidence, proof, maxRelays, 1)
+		c <- 1
+	}
+
+	// "Node retrieves the evidence to update relays A's proof, then subsequently grabs the evidence to update relays B proofs." A sleep is inserted to make the race condition deterministic."
+	go storeRelayProof(proof, 1, c)
+	go storeRelayProof(proof2,2, c)
+
+	// makes sure both proofs were set
+	_, _ = <-c, <-c
+
+	// Grab the evidence (i.e when it's time to submit a claim)
+	evidence, err := GetEvidence(header, RelayEvidence, maxRelays)
+	assert.Nil(t, err)
+	assert.Equal(t, evidence.NumOfProofs, int64(2))
 
 }
 
