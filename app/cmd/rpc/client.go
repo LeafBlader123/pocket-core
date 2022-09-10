@@ -16,6 +16,15 @@ import (
 	"github.com/pokt-network/pocket-core/app"
 	"github.com/pokt-network/pocket-core/x/pocketcore/types"
 )
+var client *http.Client
+
+func init() {
+	tr := &http.Transport{
+		 MaxIdleConnsPerHost: 1024,
+		 TLSHandshakeTimeout: 0 * time.Second,
+	}
+    client = &http.Client{Transport: tr}
+}
 
 // Dispatch supports CORS functionality
 func Dispatch(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
@@ -243,7 +252,7 @@ func executeHTTPRequest(payload, url, userAgent string, basicAuth types.BasicAut
 		}
 	}
 	// execute the request
-	resp, err := (&http.Client{Timeout: types.GetRPCTimeout() * time.Millisecond}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return payload, err
 	}
