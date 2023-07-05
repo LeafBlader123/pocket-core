@@ -5,14 +5,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
-	"reflect"
-
 	"github.com/pokt-network/pocket-core/crypto"
+	"github.com/pokt-network/pocket-core/store/rootmulti"
 	sdk "github.com/pokt-network/pocket-core/types"
 	"github.com/pokt-network/pocket-core/x/auth"
 	"github.com/pokt-network/pocket-core/x/auth/types"
 	pocketKeeper "github.com/pokt-network/pocket-core/x/pocketcore/keeper"
+	"github.com/syndtr/goleveldb/leveldb/util"
+	log2 "github.com/tendermint/tendermint/libs/log"
+	state2 "github.com/tendermint/tendermint/state"
+	db2 "github.com/tendermint/tm-db"
+	"log"
+	"os"
+	"reflect"
 )
 
 func GenerateAAT(appPubKey, clientPubKey string, key crypto.PrivateKey) (aatjson []byte, err error) {
@@ -119,4 +124,53 @@ func UnmarshalTx(txBytes []byte, height int64) (types.StdTx, error) {
 		return types.StdTx{}, fmt.Errorf("Could not decode transaction: " + err.Error())
 	}
 	return tx.(auth.StdTx), nil
+}
+
+func UnsafeDeleteData(config sdk.Config, lastDeleteHeight int64) {
+	// setup the database
+	db, err := OpenApplicationDB(config)
+	if err != nil {
+		fmt.Println("error loading application database: ", err)
+		return
+	}
+	blockStore, _, blockStoreDB, _, err := state2.BlocksAndStateFromDB(&config.TendermintConfig, state2.DefaultDBProvider)
+	if err != nil {
+		fmt.Println("error loading blockstore/state db: ", err)
+		return
+	}
+	maxPruneHeight := blockStore.Height() - 100
+	if maxPruneHeight < 0 {
+		maxPruneHeight = 0
+	}
+	if lastDeleteHeight >= maxPruneHeight {
+		fmt.Printf("Can't prune up to %d; You must maintain atleast 100 blocks for safety\nMaxPruneHeight is %d\n", lastDeleteHeight, maxPruneHeight)
+		return
+	}
+	fmt.Println("Pruning blockstore...")
+	_, err = blockStore.PruneBlocks(lastDeleteHeight + 1)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Compacting blockstore, this could take a while...")
+	err = blockStoreDB.(*db2.GoLevelDB).Compact(util.Range{})
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	fmt.Println("Done pruning blockstore")
+	loggerFile, _ := os.Open(os.DevNull)
+	a := NewPocketCoreApp(nil, nil, nil, nil, log2.NewTMLogger(loggerFile), db, false, GlobalConfig.PocketConfig.IavlCacheSize)
+	fmt.Println("Starting unsafe delete operation from blocks 0 to latestHeight")
+	// get multistore
+	ms := a.Store().(*rootmulti.Store)
+	for i := int64(0); i < lastDeleteHeight; i++ {
+		fmt.Println("Attempting to delete version: ", i)
+		ms.DeleteVersions(i)
+	}
+	fmt.Println("Compacting AppDB, this could take a while...")
+	err = db.(*db2.GoLevelDB).Compact(util.Range{})
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+
+	fmt.Println("done")
 }
